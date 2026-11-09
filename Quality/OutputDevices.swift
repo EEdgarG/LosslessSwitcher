@@ -411,7 +411,7 @@ class OutputDevices: ObservableObject {
             // The last prompt got no answer: ask again now that a track is playing.
             OutputDevices.musicPermission = .unknown
         }
-        if usesAppleScriptRate, isNewTrack {
+        if wantsAppleScriptRate, isNewTrack {
             startMusicPoll(expectedTitle: mt.title)
         }
         
@@ -434,11 +434,12 @@ class OutputDevices: ObservableObject {
     }
     
     /// Whether macOS lets this app send Apple events to Music.
-    /// - unknown: not asked yet in this launch, or the last answer wasn't final (the prompt
-    ///   expired with -1712, or Music wasn't running); the next track change asks again.
-    /// - checking: the question is in flight on `musicPermissionQueue`.
-    /// - undetermined: the last question got no final answer; the log path covers the current
-    ///   track, and the next track change moves back to `unknown` to ask again.
+    /// - unknown: not asked yet in this launch.
+    /// - checking: the question is in flight on `musicPermissionQueue`. The prompt can stay open
+    ///   for as long as the user leaves it (measured: 9 minutes, it doesn't expire), so the log
+    ///   pairing keeps switching meanwhile.
+    /// - undetermined: the question ended without a yes or no (e.g. -600, Music not running);
+    ///   the log path covers the current track, and the next track change asks again.
     private enum MusicPermission {
         case unknown, checking, granted, denied, undetermined
     }
@@ -495,7 +496,21 @@ class OutputDevices: ObservableObject {
         return formatter
     }()
     
+    /// True when the AppleScript path decides the rate, which turns the log pairing off.
+    /// While the permission question is open (`checking`) the log pairing stays on, so the device
+    /// still follows the music, and the AppleScript reading takes over once permission is granted.
     var usesAppleScriptRate: Bool {
+        guard Defaults.shared.useAppleScriptSampleRate else { return false }
+        switch OutputDevices.musicPermission {
+        case .checking, .denied, .undetermined:
+            return false
+        case .unknown, .granted:
+            return true
+        }
+    }
+    
+    /// True when a track change should start (or wait to start) an AppleScript reading.
+    private var wantsAppleScriptRate: Bool {
         guard Defaults.shared.useAppleScriptSampleRate else { return false }
         switch OutputDevices.musicPermission {
         case .denied, .undetermined:
@@ -540,7 +555,7 @@ class OutputDevices: ObservableObject {
         musicPermissionQueue.async {
             let music = NSAppleEventDescriptor(bundleIdentifier: "com.apple.Music")
             // Wildcard class and ID: "may this app send Music any Apple event". askUserIfNeeded
-            // shows the prompt and blocks this queue until it's answered or expires.
+            // shows the prompt and blocks this queue until it's answered.
             let status = AEDeterminePermissionToAutomateTarget(music.aeDesc, AEEventClass(typeWildCard), AEEventID(typeWildCard), true)
             
             let permission: MusicPermission
@@ -550,9 +565,8 @@ class OutputDevices: ObservableObject {
             case -1743: // errAEEventNotPermitted: the user said no, now or earlier
                 permission = .denied
             default:
-                // -1712 (errAETimeout): nobody answered the prompt and it expired.
-                // -600 (procNotFound): Music isn't running, so macOS can't ask.
-                // Neither is a "no", so the next track change asks again.
+                // -600 (procNotFound): Music quit before macOS could ask. Not a "no", so the next
+                // track change asks again. -1712 isn't expected here: the prompt doesn't expire.
                 permission = .undetermined
             }
             
