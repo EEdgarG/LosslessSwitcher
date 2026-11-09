@@ -24,7 +24,10 @@ class MediaRemoteController {
         
         controller.onTrackInfoReceived = { [weak outputDevices] trackInfo in
             print("track \(trackInfo.payload.uniqueIdentifier) \(trackInfo.payload.title ?? "nil")")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            // The AppleScript path polls until Music reports the new track, so it doesn't
+            // need the 1 s head start the log pairing relies on.
+            let delay: TimeInterval = (outputDevices?.usesAppleScriptRate ?? false) ? 0 : 1
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                 guard let outputDevices else { return }
                 outputDevices.trackDidChange(trackInfo)
             }
