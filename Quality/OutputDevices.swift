@@ -5,6 +5,7 @@
 //  Created by Vincent Neo on 20/4/22.
 //
 
+import AppKit
 import Combine
 import Foundation
 import SimplyCoreAudio
@@ -67,7 +68,8 @@ class OutputDevices: ObservableObject {
             
             let key = entry.trackName ?? UUID().uuidString
             
-            if entry.trackName == nil, let lastKey = self?.collection.keys.last, let lastDate = self?.collection[lastKey]?.format?.date {
+            // The AppleScript path keeps every line: it only uses them to look up bit depth.
+            if self?.usesAppleScriptRate == false, entry.trackName == nil, let lastKey = self?.collection.keys.last, let lastDate = self?.collection[lastKey]?.format?.date {
                 if abs(lastDate.timeIntervalSince1970 - entry.date.timeIntervalSince1970) < 1 {
                     return
                 }
@@ -88,6 +90,8 @@ class OutputDevices: ObservableObject {
             .throttle(for: 0.2, scheduler: DispatchQueue.global(), latest: true)
             .receive(on: pairHandlingQueue)
             .sink { [weak self] in
+                // With the AppleScript path on, the log only supplies bit depth; it doesn't switch.
+                guard self?.usesAppleScriptRate == false else { return }
                 guard let collection = self?.collection, let currentTrackPair = self?.currentTrackPair else { return }
                 print(collection)
                 var limit = 0
@@ -373,6 +377,8 @@ class OutputDevices: ObservableObject {
         let mt = MediaTrack(trackInfo: newTrack)
         
         guard previousTrack != mt else { return }
+        // MediaRemote can repeat the same track; only a real change restarts the AppleScript poll.
+        let isNewTrack = currentTrack != mt
         self.previousTrack = self.currentTrack
         self.currentTrack = mt
 
@@ -395,6 +401,11 @@ class OutputDevices: ObservableObject {
         }
         
         
+        if usesAppleScriptRate, isNewTrack {
+            appleScriptGeneration += 1
+            pollMusic(expectedTitle: mt.title, generation: appleScriptGeneration, attempt: 0, start: Date())
+        }
+        
 //        if self.previousTrack != self.currentTrack {
 //            self.renewTimer()
 //        }
@@ -402,5 +413,97 @@ class OutputDevices: ObservableObject {
 //            self.switchLatestSampleRate()
 //        }
         lastTrackChangeTime = Date()
+    }
+    
+    // MARK: - Prototype for #159: sample rate from AppleScript
+    
+    private enum MusicReading {
+        case notRunning
+        case denied
+        case failed(code: Int)
+        case playing(name: String?, sampleRate: Int?)
+    }
+    
+    private var appleScriptDenied = false
+    private var appleScriptGeneration = 0
+    private let musicPollInterval: TimeInterval = 0.2
+    private let musicMaxPolls = 15
+    
+    private lazy var nowPlayingScript: NSAppleScript? = {
+        let source = "tell application \"Music\" to return {name of current track, sample rate of current track}"
+        let script = NSAppleScript(source: source)
+        var error: NSDictionary?
+        script?.compileAndReturnError(&error)
+        if let error {
+            print("[AS159] compile error \(error)")
+        }
+        return script
+    }()
+    
+    private static let logClock: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "HH:mm:ss.SSS"
+        return formatter
+    }()
+    
+    var usesAppleScriptRate: Bool {
+        return Defaults.shared.useAppleScriptSampleRate && !appleScriptDenied
+    }
+    
+    private func readMusic() -> MusicReading {
+        let running = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Music")
+        guard !running.isEmpty else { return .notRunning }
+        guard let script = nowPlayingScript else { return .failed(code: 0) }
+        
+        var error: NSDictionary?
+        let result = script.executeAndReturnError(&error)
+        if let error {
+            let code = error[NSAppleScript.errorNumber] as? Int ?? 0
+            return code == -1743 ? .denied : .failed(code: code)
+        }
+        
+        let name = result.atIndex(1)?.stringValue
+        let sampleRate = result.atIndex(2)?.stringValue.flatMap { Double($0) }.map { Int($0) }
+        return .playing(name: name, sampleRate: sampleRate)
+    }
+    
+    private func pollMusic(expectedTitle: String?, generation: Int, attempt: Int, start: Date) {
+        guard generation == appleScriptGeneration else { return }
+        
+        let reading = readMusic()
+        let elapsed = Date().timeIntervalSince(start)
+        print("[AS159] \(OutputDevices.logClock.string(from: Date())) +\(String(format: "%.2f", elapsed))s poll \(attempt) expected=\(expectedTitle ?? "nil") reading=\(reading)")
+        
+        switch reading {
+        case .denied:
+            appleScriptDenied = true
+            print("[AS159] Apple Events permission denied, falling back to log pairing")
+            updateRequester.send()
+            return
+        case .playing(let name, let sampleRate?) where name == expectedTitle:
+            applyMusicSampleRate(sampleRate, elapsed: elapsed)
+            return
+        default:
+            break
+        }
+        
+        guard attempt + 1 < musicMaxPolls else {
+            print("[AS159] gave up after \(musicMaxPolls) polls, rate left unchanged")
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + musicPollInterval) { [weak self] in
+            self?.pollMusic(expectedTitle: expectedTitle, generation: generation, attempt: attempt + 1, start: start)
+        }
+    }
+    
+    private func applyMusicSampleRate(_ sampleRate: Int, elapsed: TimeInterval) {
+        pairHandlingQueue.async { [weak self] in
+            guard let self else { return }
+            let match = self.collection.values.reversed().first { $0.format?.object.sampleRate == sampleRate }
+            let bitDepth = match?.format?.object.bitDepth
+            print("[AS159] \(OutputDevices.logClock.string(from: Date())) apply \(sampleRate) Hz / \(bitDepth.map(String.init) ?? "?") bit (bit depth from log: \(match != nil)) after +\(String(format: "%.2f", elapsed))s")
+            self.switchLatestSampleRate(format: AudioFormat(sampleRate: sampleRate, bitDepth: bitDepth))
+        }
     }
 }

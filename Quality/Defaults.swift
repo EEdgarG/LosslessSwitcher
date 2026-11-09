@@ -14,12 +14,14 @@ class Defaults: ObservableObject {
     private let kUserPreferBitDepthDetection = "com.vincent-neo.LosslessSwitcher-Key-BitDepthDetection"
     private let kShellScriptPath = "KeyShellScriptPath"
     private let kUserPreferSampleRateMultiples = "PreferSampleRateMultiples"
+    private let kUseAppleScriptSampleRate = "UseAppleScriptSampleRate"
     
     private init() {
         UserDefaults.standard.register(defaults: [
             kUserPreferIconStatusBarItem : true,
             kUserPreferBitDepthDetection : false,
-            kUserPreferSampleRateMultiples : false
+            kUserPreferSampleRateMultiples : false,
+            kUseAppleScriptSampleRate : true
         ])
         
         self.shellScriptPath = UserDefaults.standard.string(forKey: kShellScriptPath)
@@ -56,6 +58,13 @@ class Defaults: ObservableObject {
     }
     
     @Published var userPreferBitDepthDetection: Bool
+    
+    // Prototype for #159: read the sample rate from Music via AppleScript instead of
+    // pairing log lines with tracks. No UI on purpose; switch it off for A/B runs with
+    // `defaults write <bundle id> UseAppleScriptSampleRate -bool NO`.
+    var useAppleScriptSampleRate: Bool {
+        return UserDefaults.standard.bool(forKey: kUseAppleScriptSampleRate)
+    }
     
     
     @MainActor func setPreferBitDepthDetection(newValue: Bool) {
