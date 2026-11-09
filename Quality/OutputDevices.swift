@@ -76,6 +76,7 @@ class OutputDevices: ObservableObject {
             }
             
             let format = DatedPair(date: entry.date, object: AudioFormat(sampleRate: entry.sampleRate, bitDepth: entry.bitDepth))
+            self?.recordMusicFormatLine(format)
             if let pair = self?.collection[key] {
                 pair.format = format
             }
@@ -138,6 +139,8 @@ class OutputDevices: ObservableObject {
             self.enableBitDepthDetection = newValue
         })
         
+        observeMusicTermination()
+
     }
     
     deinit {
@@ -146,6 +149,9 @@ class OutputDevices: ObservableObject {
         timerCancellable?.cancel()
         enableBitDepthDetectionCancellable?.cancel()
         entryStreamReceiver?.cancel()
+        if let musicTerminationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(musicTerminationObserver)
+        }
         //timer.upstream.connect().cancel()
     }
     
@@ -401,9 +407,12 @@ class OutputDevices: ObservableObject {
         }
         
         
+        if Defaults.shared.useAppleScriptSampleRate, OutputDevices.musicPermission == .undetermined {
+            // The last prompt got no answer: ask again now that a track is playing.
+            OutputDevices.musicPermission = .unknown
+        }
         if usesAppleScriptRate, isNewTrack {
-            appleScriptGeneration += 1
-            pollMusic(expectedTitle: mt.title, generation: appleScriptGeneration, attempt: 0, start: Date())
+            startMusicPoll(expectedTitle: mt.title)
         }
         
 //        if self.previousTrack != self.currentTrack {
@@ -415,7 +424,7 @@ class OutputDevices: ObservableObject {
         lastTrackChangeTime = Date()
     }
     
-    // MARK: - Prototype for #159: sample rate from AppleScript
+    // MARK: - #159: sample rate from Music via AppleScript
     
     private enum MusicReading {
         case notRunning
@@ -424,13 +433,52 @@ class OutputDevices: ObservableObject {
         case playing(name: String?, sampleRate: Int?)
     }
     
-    private var appleScriptDenied = false
+    /// Whether macOS lets this app send Apple events to Music.
+    /// - unknown: not asked yet in this launch, or the last answer wasn't final (the prompt
+    ///   expired with -1712, or Music wasn't running); the next track change asks again.
+    /// - checking: the question is in flight on `musicPermissionQueue`.
+    /// - undetermined: the last question got no final answer; the log path covers the current
+    ///   track, and the next track change moves back to `unknown` to ask again.
+    private enum MusicPermission {
+        case unknown, checking, granted, denied, undetermined
+    }
+    
+    // AppDelegate and MenuBarController each create an OutputDevices, so the permission state
+    // is shared: the user gets one prompt, and both instances learn the answer.
+    // It's read from the main thread, pairHandlingQueue and MediaRemote's callback, hence the lock.
+    private static let musicPermissionLock = NSLock()
+    private static var _musicPermission = MusicPermission.unknown
+    private static var musicPermission: MusicPermission {
+        get { musicPermissionLock.withLock { _musicPermission } }
+        set { musicPermissionLock.withLock { _musicPermission = newValue } }
+    }
+    /// Callbacks waiting for the answer to the question in flight. Main thread only.
+    private static var musicPermissionWaiters: [(MusicPermission) -> Void] = []
+    /// The permission question can block for as long as the macOS prompt stays open
+    /// (up to 2 minutes), so it never runs on the main thread.
+    private static let musicPermissionQueue = DispatchQueue(label: "musicPermission", qos: .userInitiated)
+    
     private var appleScriptGeneration = 0
     private let musicPollInterval: TimeInterval = 0.2
     private let musicMaxPolls = 15
     
+    /// Recent lossless `ampplay` lines, oldest first. Only pairHandlingQueue touches them.
+    /// The AppleScript path uses them for bit depth only.
+    private var musicFormatLines: [DatedPair<AudioFormat>] = []
+    private let musicFormatLinesLimit = 32
+    /// Date of the last line whose bit depth was used, so the next track starts after it.
+    private var lastUsedFormatLineDate: Date?
+    private var musicTerminationObserver: NSObjectProtocol?
+    
+    // `with timeout` bounds a busy or hung Music to 2 s instead of the default 120 s, because
+    // this script runs on the main thread. It only runs once permission is granted, so it never
+    // waits on the permission prompt.
     private lazy var nowPlayingScript: NSAppleScript? = {
-        let source = "tell application \"Music\" to return {name of current track, sample rate of current track}"
+        let source = """
+        with timeout of 2 seconds
+            tell application "Music" to return {name of current track, sample rate of current track}
+        end timeout
+        """
         let script = NSAppleScript(source: source)
         var error: NSDictionary?
         script?.compileAndReturnError(&error)
@@ -448,7 +496,74 @@ class OutputDevices: ObservableObject {
     }()
     
     var usesAppleScriptRate: Bool {
-        return Defaults.shared.useAppleScriptSampleRate && !appleScriptDenied
+        guard Defaults.shared.useAppleScriptSampleRate else { return false }
+        switch OutputDevices.musicPermission {
+        case .denied, .undetermined:
+            return false
+        case .unknown, .checking, .granted:
+            return true
+        }
+    }
+    
+    /// Called on the main thread from trackDidChange.
+    private func startMusicPoll(expectedTitle: String?) {
+        appleScriptGeneration += 1
+        let generation = appleScriptGeneration
+        let start = Date()
+        
+        guard OutputDevices.musicPermission != .granted else {
+            pollMusic(expectedTitle: expectedTitle, generation: generation, attempt: 0, start: start)
+            return
+        }
+        
+        OutputDevices.requestMusicPermission { [weak self] permission in
+            guard let self else { return }
+            if permission == .granted {
+                // If the track changed while the prompt was open, the generation check drops this poll.
+                self.pollMusic(expectedTitle: expectedTitle, generation: generation, attempt: 0, start: start)
+            }
+            else {
+                // Denied or no final answer: let the log pairing handle the current track.
+                self.updateRequester.send()
+            }
+        }
+    }
+    
+    /// Asks macOS whether this app may send Apple events to Music, showing the prompt if needed.
+    /// Main thread only. `completion` runs on the main thread.
+    private static func requestMusicPermission(completion: @escaping (MusicPermission) -> Void) {
+        musicPermissionWaiters.append(completion)
+        guard musicPermission != .checking else { return }
+        musicPermission = .checking
+        print("[AS159] \(logClock.string(from: Date())) asking for Apple Events permission")
+        
+        musicPermissionQueue.async {
+            let music = NSAppleEventDescriptor(bundleIdentifier: "com.apple.Music")
+            // Wildcard class and ID: "may this app send Music any Apple event". askUserIfNeeded
+            // shows the prompt and blocks this queue until it's answered or expires.
+            let status = AEDeterminePermissionToAutomateTarget(music.aeDesc, AEEventClass(typeWildCard), AEEventID(typeWildCard), true)
+            
+            let permission: MusicPermission
+            switch status {
+            case OSStatus(noErr):
+                permission = .granted
+            case -1743: // errAEEventNotPermitted: the user said no, now or earlier
+                permission = .denied
+            default:
+                // -1712 (errAETimeout): nobody answered the prompt and it expired.
+                // -600 (procNotFound): Music isn't running, so macOS can't ask.
+                // Neither is a "no", so the next track change asks again.
+                permission = .undetermined
+            }
+            
+            DispatchQueue.main.async {
+                print("[AS159] \(OutputDevices.logClock.string(from: Date())) Apple Events permission status \(status) -> \(permission)")
+                OutputDevices.musicPermission = permission
+                let waiters = OutputDevices.musicPermissionWaiters
+                OutputDevices.musicPermissionWaiters = []
+                waiters.forEach { $0(permission) }
+            }
+        }
     }
     
     private func readMusic() -> MusicReading {
@@ -459,6 +574,8 @@ class OutputDevices: ObservableObject {
         var error: NSDictionary?
         let result = script.executeAndReturnError(&error)
         if let error {
+            // -1743 here means the permission was revoked while the app was running.
+            // -1712 here is Music taking over 2 s to answer, not the prompt: keep polling.
             let code = error[NSAppleScript.errorNumber] as? Int ?? 0
             return code == -1743 ? .denied : .failed(code: code)
         }
@@ -477,7 +594,7 @@ class OutputDevices: ObservableObject {
         
         switch reading {
         case .denied:
-            appleScriptDenied = true
+            OutputDevices.musicPermission = .denied
             print("[AS159] Apple Events permission denied, falling back to log pairing")
             updateRequester.send()
             return
@@ -497,12 +614,52 @@ class OutputDevices: ObservableObject {
         }
     }
     
+    /// Called on pairHandlingQueue for every lossless log line.
+    private func recordMusicFormatLine(_ line: DatedPair<AudioFormat>) {
+        musicFormatLines.append(line)
+        if musicFormatLines.count > musicFormatLinesLimit {
+            musicFormatLines.removeFirst(musicFormatLines.count - musicFormatLinesLimit)
+        }
+    }
+    
+    /// Picks the log line whose bit depth belongs to the track now playing.
+    ///
+    /// Music writes one line each time it loads a track, in play order, and with gapless
+    /// playback it loads the next track while the current one plays. So right after a change
+    /// the newest line can belong to the next track. The first line with the same rate that
+    /// comes after the line used for the previous track is the current track's own line, even
+    /// when the next track has the same rate and a different bit depth.
+    /// If there is no such line, it falls back to the newest line with the same rate.
+    private func musicFormatLine(forSampleRate sampleRate: Int) -> (line: DatedPair<AudioFormat>, isNext: Bool)? {
+        let sameRate = musicFormatLines.filter { $0.object.sampleRate == sampleRate }
+        if let next = sameRate.first(where: { lastUsedFormatLineDate == nil || $0.date > lastUsedFormatLineDate! }) {
+            lastUsedFormatLineDate = next.date
+            return (line: next, isNext: true)
+        }
+        return sameRate.last.map { (line: $0, isNext: false) }
+    }
+    
+    /// Forget the log lines when Music quits: the next launch starts a new play order.
+    private func observeMusicTermination() {
+        musicTerminationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: nil
+        ) { [weak self] notification in
+            let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            guard app?.bundleIdentifier == "com.apple.Music" else { return }
+            self?.pairHandlingQueue.async {
+                self?.musicFormatLines.removeAll()
+                self?.lastUsedFormatLineDate = nil
+            }
+        }
+    }
+    
     private func applyMusicSampleRate(_ sampleRate: Int, elapsed: TimeInterval) {
         pairHandlingQueue.async { [weak self] in
             guard let self else { return }
-            let match = self.collection.values.reversed().first { $0.format?.object.sampleRate == sampleRate }
-            let bitDepth = match?.format?.object.bitDepth
-            print("[AS159] \(OutputDevices.logClock.string(from: Date())) apply \(sampleRate) Hz / \(bitDepth.map(String.init) ?? "?") bit (bit depth from log: \(match != nil)) after +\(String(format: "%.2f", elapsed))s")
+            let match = self.musicFormatLine(forSampleRate: sampleRate)
+            let bitDepth = match?.line.object.bitDepth
+            let source = match.map { $0.isNext ? "next unused line" : "newest line, already used" } ?? "none"
+            print("[AS159] \(OutputDevices.logClock.string(from: Date())) apply \(sampleRate) Hz / \(bitDepth.map(String.init) ?? "?") bit (bit depth from log: \(match != nil), \(source)) after +\(String(format: "%.2f", elapsed))s")
             self.switchLatestSampleRate(format: AudioFormat(sampleRate: sampleRate, bitDepth: bitDepth))
         }
     }
