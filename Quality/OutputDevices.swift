@@ -57,6 +57,7 @@ class OutputDevices: ObservableObject {
     init() {
         self.outputDevices = self.coreAudio.allOutputDevices
         self.defaultOutputDevice = self.coreAudio.defaultOutputDevice
+        self.restoreSelectedOutputDevice()
         self.getDeviceSampleRate()
         
         self.logReader.spawnProcessIfNeeded()
@@ -118,6 +119,7 @@ class OutputDevices: ObservableObject {
         changesCancellable =
             NotificationCenter.default.publisher(for: .deviceListChanged).sink(receiveValue: { _ in
                 self.outputDevices = self.coreAudio.allOutputDevices
+                self.restoreSelectedOutputDevice()
             })
         
         defaultChangesCancellable =
@@ -143,6 +145,30 @@ class OutputDevices: ObservableObject {
         enableBitDepthDetectionCancellable?.cancel()
         entryStreamReceiver?.cancel()
         //timer.upstream.connect().cancel()
+    }
+    
+    /// Selects the output device with `uid` (nil = follow the system default)
+    /// and remembers the choice for the next launch.
+    func selectOutputDevice(uid: String?) {
+        Defaults.shared.selectedDeviceUID = uid
+        self.selectedOutputDevice = self.outputDevice(uid: uid)
+    }
+    
+    /// Re-applies the saved selection. If the saved device is not connected,
+    /// falls back to the system default but keeps the saved UID, so the
+    /// device is picked again when it reappears.
+    /// Compares by `id`, not `uid`: a disconnected AudioDevice reports a nil
+    /// uid, which would look equal to "no saved device" and keep it selected.
+    private func restoreSelectedOutputDevice() {
+        let saved = self.outputDevice(uid: Defaults.shared.selectedDeviceUID)
+        if saved?.id != self.selectedOutputDevice?.id {
+            self.selectedOutputDevice = saved
+        }
+    }
+    
+    private func outputDevice(uid: String?) -> AudioDevice? {
+        guard let uid else { return nil }
+        return self.outputDevices.first(where: { $0.uid == uid })
     }
     
     func renewTimer() {

@@ -15,6 +15,13 @@ struct MenuView: View {
     
     @State var stream = LogReader()
     
+    private var selectedDeviceUID: Binding<String?> {
+        Binding(
+            get: { outputDevices.selectedOutputDevice?.uid },
+            set: { outputDevices.selectOutputDevice(uid: $0) }
+        )
+    }
+    
     var body: some View {
         VStack {
             ContentView()
@@ -49,31 +56,13 @@ struct MenuView: View {
                 }
             }
             
-            Menu {
-                Button {
-                    outputDevices.selectedOutputDevice = nil
-                    defaults.selectedDeviceUID = nil
-                } label: {
-                    if outputDevices.selectedOutputDevice == nil {
-                        Image(systemName: "checkmark")
-                    }
-                    Text("Default Device")
-                }
-
+            Picker("Selected Device", selection: selectedDeviceUID) {
+                Text("Default Device").tag(String?.none)
                 ForEach(outputDevices.outputDevices, id: \.uid) { device in
-                    Button {
-                        outputDevices.selectedOutputDevice = device
-                        defaults.selectedDeviceUID = device.uid
-                    } label: {
-                        Text(device.name)
-                        if outputDevices.selectedOutputDevice?.uid == device.uid {
-                            Image(systemName: "checkmark")
-                        }
-                    }
+                    Text(device.name).tag(device.uid)
                 }
-            } label: {
-                Text("Selected Device")
             }
+            .pickerStyle(.menu)
             
             Menu {
                 Text("Version - \(currentVersion)")
