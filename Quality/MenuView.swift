@@ -17,7 +17,10 @@ struct MenuView: View {
     
     private var selectedDeviceUID: Binding<String?> {
         Binding(
-            get: { outputDevices.selectedOutputDevice?.uid },
+            get: {
+                outputDevices.selectedOutputDevice?.uid
+                    ?? outputDevices.missingSelectedDevice?.uid
+            },
             set: { outputDevices.selectOutputDevice(uid: $0) }
         )
     }
@@ -60,6 +63,9 @@ struct MenuView: View {
                 Text("Default Device").tag(String?.none)
                 ForEach(outputDevices.outputDevices, id: \.uid) { device in
                     Text(device.name).tag(device.uid)
+                }
+                if let missing = outputDevices.missingSelectedDevice {
+                    Text("\(missing.name) (disconnected)").tag(String?.some(missing.uid))
                 }
             }
             .pickerStyle(.menu)

@@ -150,20 +150,51 @@ class OutputDevices: ObservableObject {
     /// Selects the output device with `uid` (nil = follow the system default)
     /// and remembers the choice for the next launch.
     func selectOutputDevice(uid: String?) {
+        let device = self.outputDevice(uid: uid)
         Defaults.shared.selectedDeviceUID = uid
-        self.selectedOutputDevice = self.outputDevice(uid: uid)
+        if let device {
+            Defaults.shared.selectedDeviceName = device.name
+        }
+        else if uid == nil {
+            Defaults.shared.selectedDeviceName = nil
+        }
+        // else: the disconnected device was picked again; keep its saved name.
+        self.selectedOutputDevice = device
     }
     
     /// Re-applies the saved selection. If the saved device is not connected,
-    /// falls back to the system default but keeps the saved UID, so the
-    /// device is picked again when it reappears.
+    /// nothing is selected and nothing is switched (see `targetDevice`), but
+    /// the saved UID is kept, so the device is picked again when it reappears.
     /// Compares by `id`, not `uid`: a disconnected AudioDevice reports a nil
     /// uid, which would look equal to "no saved device" and keep it selected.
     private func restoreSelectedOutputDevice() {
         let saved = self.outputDevice(uid: Defaults.shared.selectedDeviceUID)
+        if let saved {
+            Defaults.shared.selectedDeviceName = saved.name
+        }
         if saved?.id != self.selectedOutputDevice?.id {
             self.selectedOutputDevice = saved
         }
+    }
+    
+    /// The device whose format LosslessSwitcher reads and changes: the
+    /// selected device, or the system default when "Default Device" is
+    /// chosen. Nil while the selected device is disconnected, so no other
+    /// device is touched in the meantime (upstream #138).
+    private var targetDevice: AudioDevice? {
+        if Defaults.shared.selectedDeviceUID != nil {
+            return self.selectedOutputDevice
+        }
+        return self.defaultOutputDevice
+    }
+    
+    /// The saved device when it is not connected, for the menu label.
+    /// The name falls back to the UID for selections saved before the
+    /// name was stored.
+    var missingSelectedDevice: (uid: String, name: String)? {
+        guard let uid = Defaults.shared.selectedDeviceUID,
+              self.outputDevice(uid: uid) == nil else { return nil }
+        return (uid, Defaults.shared.selectedDeviceName ?? uid)
     }
     
     private func outputDevice(uid: String?) -> AudioDevice? {
@@ -193,7 +224,7 @@ class OutputDevices: ObservableObject {
     }
     
     func getDeviceSampleRate() {
-        let defaultDevice = self.selectedOutputDevice ?? self.defaultOutputDevice
+        let defaultDevice = self.targetDevice
         guard let sampleRate = defaultDevice?.nominalSampleRate else { return }
         self.updateSampleRate(sampleRate, bitDepth: nil)
     }
@@ -248,7 +279,7 @@ class OutputDevices: ObservableObject {
     }
     
     func switchLatestSampleRate(format: AudioFormat) {
-        let defaultDevice = self.selectedOutputDevice ?? self.defaultOutputDevice
+        let defaultDevice = self.targetDevice
         
         if let supported = defaultDevice?.nominalSampleRates {
             let sampleRate = Float64(format.sampleRate)

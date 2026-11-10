@@ -25,14 +25,23 @@ struct ContentView: View {
         }
     }
     
+    /// The device LosslessSwitcher manages; a selected device that is
+    /// disconnected is shown as such instead of the system default.
+    private var deviceName: String? {
+        if let missing = outputDevices.missingSelectedDevice {
+            return "\(missing.name) (disconnected)"
+        }
+        return (outputDevices.selectedOutputDevice ?? outputDevices.defaultOutputDevice)?.name
+    }
+    
     var body: some View {
         VStack {
             if let text = sampleRateText {
                 Text(text)
                     .font(.system(size: 23, weight: .semibold, design: .default))
             }
-            if let device = outputDevices.selectedOutputDevice ?? outputDevices.defaultOutputDevice {
-                Text(device.name)
+            if let name = deviceName {
+                Text(name)
                     .font(.system(size: 14.5, weight: .regular, design: .default))
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
