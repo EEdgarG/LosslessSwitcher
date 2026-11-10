@@ -11,6 +11,7 @@ class Defaults: ObservableObject {
     static let shared = Defaults()
     private let kUserPreferIconStatusBarItem = "com.vincent-neo.LosslessSwitcher-Key-UserPreferIconStatusBarItem"
     private let kSelectedDeviceUID = "com.vincent-neo.LosslessSwitcher-Key-SelectedDeviceUID"
+    private let kSelectedDeviceName = "com.vincent-neo.LosslessSwitcher-Key-SelectedDeviceName"
     private let kUserPreferBitDepthDetection = "com.vincent-neo.LosslessSwitcher-Key-BitDepthDetection"
     private let kShellScriptPath = "KeyShellScriptPath"
     private let kUserPreferSampleRateMultiples = "PreferSampleRateMultiples"
@@ -46,6 +47,17 @@ class Defaults: ObservableObject {
         }
         set {
             UserDefaults.standard.set(newValue, forKey: kSelectedDeviceUID)
+        }
+    }
+    
+    /// Name of the selected device, saved so the menu can label it while
+    /// it is disconnected (a disconnected device has no name to read).
+    var selectedDeviceName: String? {
+        get {
+            return UserDefaults.standard.string(forKey: kSelectedDeviceName)
+        }
+        set {
+            UserDefaults.standard.set(newValue, forKey: kSelectedDeviceName)
         }
     }
     
