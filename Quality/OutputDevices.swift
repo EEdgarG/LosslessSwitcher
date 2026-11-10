@@ -157,9 +157,11 @@ class OutputDevices: ObservableObject {
     /// Re-applies the saved selection. If the saved device is not connected,
     /// falls back to the system default but keeps the saved UID, so the
     /// device is picked again when it reappears.
+    /// Compares by `id`, not `uid`: a disconnected AudioDevice reports a nil
+    /// uid, which would look equal to "no saved device" and keep it selected.
     private func restoreSelectedOutputDevice() {
         let saved = self.outputDevice(uid: Defaults.shared.selectedDeviceUID)
-        if saved?.uid != self.selectedOutputDevice?.uid {
+        if saved?.id != self.selectedOutputDevice?.id {
             self.selectedOutputDevice = saved
         }
     }
