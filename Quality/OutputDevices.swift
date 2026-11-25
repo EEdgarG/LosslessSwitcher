@@ -88,7 +88,7 @@ class OutputDevices: ObservableObject {
             .throttle(for: 0.2, scheduler: DispatchQueue.global(), latest: true)
             .receive(on: pairHandlingQueue)
             .sink { [weak self] in
-                guard let collection = self?.collection, let currentTrackPair = self?.currentTrackPair else { return }
+                guard let collection = self?.collection, self?.currentTrackPair != nil else { return }
                 print(collection)
                 var limit = 0
                 for (_, value) in collection.reversed() {

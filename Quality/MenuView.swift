@@ -92,8 +92,8 @@ struct MenuView: View {
                     
                     panel.begin { response in
                         let path = panel.url?.path
-                        DispatchQueue.main.async { [weak defaults] in
-                            defaults?.shellScriptPath = path
+                        DispatchQueue.main.async {
+                            defaults.shellScriptPath = path
                         }
                     }
                 }
