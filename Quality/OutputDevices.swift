@@ -174,6 +174,26 @@ class OutputDevices: ObservableObject {
         }
         if saved?.id != self.selectedOutputDevice?.id {
             self.selectedOutputDevice = saved
+            if saved != nil {
+                self.reapplyLatestFormat()
+            }
+        }
+    }
+
+    /// Applies the newest format Music logged to the device that was just
+    /// plugged in. Music logs no new format when the output device changes,
+    /// so otherwise nothing switches until the next track. Uses the newest
+    /// format rather than the one paired with the current track, because the
+    /// pairing is often still missing at this point.
+    private func reapplyLatestFormat() {
+        pairHandlingQueue.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self else { return }
+            let latest = self.collection.values
+                .compactMap { $0.format }
+                .max(by: { $0.date < $1.date })
+            if let format = latest?.object {
+                self.switchLatestSampleRate(format: format)
+            }
         }
     }
     
