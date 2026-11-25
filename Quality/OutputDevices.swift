@@ -76,7 +76,7 @@ class OutputDevices: ObservableObject {
             }
             
             let format = DatedPair(date: entry.date, object: AudioFormat(sampleRate: entry.sampleRate, bitDepth: entry.bitDepth))
-            self?.recordMusicFormatLine(format)
+            self?.recordMusicFormatLine(format, title: entry.trackName)
             if let pair = self?.collection[key] {
                 pair.format = format
             }
@@ -463,9 +463,10 @@ class OutputDevices: ObservableObject {
     private let musicPollInterval: TimeInterval = 0.2
     private let musicMaxPolls = 15
     
-    /// Recent lossless `ampplay` lines, oldest first. Only pairHandlingQueue touches them.
+    /// Recent lossless `ampplay` lines, oldest first, with the track Music named for each
+    /// (nil if it named none). Only pairHandlingQueue touches them.
     /// The AppleScript path uses them for bit depth only.
-    private var musicFormatLines: [DatedPair<AudioFormat>] = []
+    private var musicFormatLines: [(line: DatedPair<AudioFormat>, title: String?)] = []
     private let musicFormatLinesLimit = 32
     /// Date of the last line whose bit depth was used, so the next track starts after it.
     private var lastUsedFormatLineDate: Date?
@@ -613,7 +614,7 @@ class OutputDevices: ObservableObject {
             updateRequester.send()
             return
         case .playing(let name, let sampleRate?) where name == expectedTitle:
-            applyMusicSampleRate(sampleRate, elapsed: elapsed)
+            applyMusicSampleRate(sampleRate, title: name, elapsed: elapsed)
             return
         default:
             break
@@ -629,8 +630,8 @@ class OutputDevices: ObservableObject {
     }
     
     /// Called on pairHandlingQueue for every lossless log line.
-    private func recordMusicFormatLine(_ line: DatedPair<AudioFormat>) {
-        musicFormatLines.append(line)
+    private func recordMusicFormatLine(_ line: DatedPair<AudioFormat>, title: String?) {
+        musicFormatLines.append((line: line, title: title))
         if musicFormatLines.count > musicFormatLinesLimit {
             musicFormatLines.removeFirst(musicFormatLines.count - musicFormatLinesLimit)
         }
@@ -644,13 +645,24 @@ class OutputDevices: ObservableObject {
     /// comes after the line used for the previous track is the current track's own line, even
     /// when the next track has the same rate and a different bit depth.
     /// If there is no such line, it falls back to the newest line with the same rate.
-    private func musicFormatLine(forSampleRate sampleRate: Int) -> (line: DatedPair<AudioFormat>, isNext: Bool)? {
-        let sameRate = musicFormatLines.filter { $0.object.sampleRate == sampleRate }
-        if let next = sameRate.first(where: { lastUsedFormatLineDate == nil || $0.date > lastUsedFormatLineDate! }) {
-            lastUsedFormatLineDate = next.date
-            return (line: next, isNext: true)
+    ///
+    /// The play order breaks when a track gets no line of its own or a line is never used
+    /// (a skipped or lossy track, a reading that failed), and every later track then takes the
+    /// line of the one before. So a line Music named after the track (see LogReader) wins,
+    /// and the play order only covers lines without a name. A line named after another track
+    /// is never used: an unknown bit depth is better than another track's.
+    private func musicFormatLine(forSampleRate sampleRate: Int, title: String?) -> (line: DatedPair<AudioFormat>, source: String)? {
+        let sameRate = musicFormatLines.filter { $0.line.object.sampleRate == sampleRate }
+        if let title, let named = sameRate.last(where: { $0.title == title }) {
+            lastUsedFormatLineDate = named.line.date
+            return (line: named.line, source: "line named after the track")
         }
-        return sameRate.last.map { (line: $0, isNext: false) }
+        let unnamed = sameRate.filter { $0.title == nil }.map { $0.line }
+        if let next = unnamed.first(where: { lastUsedFormatLineDate == nil || $0.date > lastUsedFormatLineDate! }) {
+            lastUsedFormatLineDate = next.date
+            return (line: next, source: "next unused line")
+        }
+        return unnamed.last.map { (line: $0, source: "newest line, already used") }
     }
     
     /// Forget the log lines when Music quits: the next launch starts a new play order.
@@ -667,12 +679,12 @@ class OutputDevices: ObservableObject {
         }
     }
     
-    private func applyMusicSampleRate(_ sampleRate: Int, elapsed: TimeInterval) {
+    private func applyMusicSampleRate(_ sampleRate: Int, title: String?, elapsed: TimeInterval) {
         pairHandlingQueue.async { [weak self] in
             guard let self else { return }
-            let match = self.musicFormatLine(forSampleRate: sampleRate)
+            let match = self.musicFormatLine(forSampleRate: sampleRate, title: title)
             let bitDepth = match?.line.object.bitDepth
-            let source = match.map { $0.isNext ? "next unused line" : "newest line, already used" } ?? "none"
+            let source = match?.source ?? "none"
             print("[AS159] \(OutputDevices.logClock.string(from: Date())) apply \(sampleRate) Hz / \(bitDepth.map(String.init) ?? "?") bit (bit depth from log: \(match != nil), \(source)) after +\(String(format: "%.2f", elapsed))s")
             self.switchLatestSampleRate(format: AudioFormat(sampleRate: sampleRate, bitDepth: bitDepth))
         }

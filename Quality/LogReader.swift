@@ -15,6 +15,8 @@ class LogReader {
     
     private var process: Process?
     private let dateFormatter: DateFormatter
+    /// The track Music loaded most recently, from its "preparer success" line.
+    private var preparedTrackName: String?
     
     init() {
         let dateFormatter = DateFormatter()
@@ -53,8 +55,12 @@ class LogReader {
                 return
             }
             
-            guard let line = String(data: data, encoding: .utf8) else { return }
-            self?.processLine(line)
+            guard let chunk = String(data: data, encoding: .utf8) else { return }
+            // One read often holds several lines, and their order matters:
+            // a track's name comes a few lines before its format line.
+            for line in chunk.split(separator: "\n") {
+                self?.processLine(String(line))
+            }
         }
         
         do {
@@ -67,6 +73,16 @@ class LogReader {
     
     private func processLine(_ line: String) {
 //        print("\n\nLINE: ", line)
+        // Music names each track it loads, without the privacy profile, just before that
+        // track's format line: "preparer success '<ITMPAVItem: 0x…> (15938::15939) Title'".
+        // This holds for the next track it preloads too, so it names the format line.
+        if let prepared = line.firstSubstring(between: "play> sn> preparer success '", and: .end) {
+            if let idEnd = prepared.range(of: ") "), prepared.hasSuffix("'") {
+                preparedTrackName = String(prepared[idEnd.upperBound..<prepared.index(before: prepared.endIndex)])
+            }
+            return
+        }
+
         guard let dateSubstring = line.firstSubstring(between: .start, and: " Df ") else { return }
         guard let messageContentSubstring = line.firstSubstring(between: "[com.apple.Music:ampplay] play> cm>> " , and: .end) else { return }
         let dateString = String(dateSubstring)
@@ -115,7 +131,7 @@ class LogReader {
         // might be helpful to prevent the early track sample rate switch issue.
         // https://eclecticlight.co/2023/03/08/removing-privacy-censorship-from-the-log/
         if let tn = trackName, tn == "<private>" {
-            trackName = nil
+            trackName = preparedTrackName
         }
         
         guard let date, let isLossless, let sampleRate else { return }
