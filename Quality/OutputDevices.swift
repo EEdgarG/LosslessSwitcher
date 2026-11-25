@@ -179,7 +179,9 @@ class OutputDevices: ObservableObject {
     func getDeviceSampleRate() {
         let defaultDevice = self.selectedOutputDevice ?? self.defaultOutputDevice
         guard let sampleRate = defaultDevice?.nominalSampleRate else { return }
-        self.updateSampleRate(sampleRate, bitDepth: nil)
+        // The device's own bit depth, so the menu shows it instead of "? bit".
+        let bitDepth = defaultDevice?.streams(scope: .output)?.first?.physicalFormat.map { Int($0.mBitsPerChannel) }
+        self.updateSampleRate(sampleRate, bitDepth: bitDepth)
     }
     
     func getSampleRateFromAppleScript() -> Double? {
@@ -236,7 +238,10 @@ class OutputDevices: ObservableObject {
         
         if let supported = defaultDevice?.nominalSampleRates {
             let sampleRate = Float64(format.sampleRate)
-            let bitDepth = Int32(format.bitDepth ?? 32)
+            // Unknown bit depth (Music logged no line for this track, e.g. it started before
+            // the app): keep the device's current one rather than switching to 32 bit.
+            let currentBitDepth = defaultDevice?.streams(scope: .output)?.first?.physicalFormat?.mBitsPerChannel
+            let bitDepth = Int32(format.bitDepth ?? currentBitDepth.map { Int($0) } ?? 32)
             
 //            if self.currentTrack == self.previousTrack, let prevSampleRate = currentSampleRate, prevSampleRate > sampleRate {
 //                print("same track, prev sample rate is higher")
